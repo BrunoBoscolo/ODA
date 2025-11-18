@@ -11,9 +11,11 @@
 static double sigmoid(double x) { return 1.0 / (1.0 + exp(-x)); }
 static double relu(double x) { return x > 0 ? x : 0; }
 static double leaky_relu(double x) { return x > 0 ? x : 0.01 * x; }
+static double linear(double x) { return x; } // Identity function
 static double sigmoid_derivative(double x) { double s = sigmoid(x); return s * (1 - s); }
 static double relu_derivative(double x) { return x > 0 ? 1 : 0; }
 static double leaky_relu_derivative(double x) { return x > 0 ? 1 : 0.01; }
+static double linear_derivative(double x) { (void)x; return 1; } // Derivative is constant 1
 
 // --- Public API Functions ---
 
@@ -29,6 +31,7 @@ void nn_apply_activation(Matrix* m, ActivationType activation_type) {
                 case SIGMOID: *val = sigmoid(*val); break;
                 case RELU: *val = relu(*val); break;
                 case LEAKY_RELU: *val = leaky_relu(*val); break;
+                case LINEAR: *val = linear(*val); break;
             }
         }
     }
@@ -47,6 +50,7 @@ void nn_apply_activation_derivative(Matrix* m, ActivationType activation_type) {
                 case SIGMOID: *val = sigmoid_derivative(*val); break;
                 case RELU: *val = relu_derivative(*val); break;
                 case LEAKY_RELU: *val = leaky_relu_derivative(*val); break;
+                case LINEAR: *val = linear_derivative(*val); break;
             }
         }
     }
@@ -121,6 +125,30 @@ void nn_init(NeuralNetwork* net) {
     gann_set_error(GANN_SUCCESS);
 }
 
+// Helper function to free only the optimizer state and its contents
+static void free_optimizer_state(OptimizerState* opt_state, int num_weight_sets) {
+    if (opt_state == NULL) {
+        return;
+    }
+    if (opt_state->m_weights) {
+        for (int i = 0; i < num_weight_sets; i++) free_matrix(opt_state->m_weights[i]);
+        free(opt_state->m_weights);
+    }
+    if (opt_state->v_weights) {
+        for (int i = 0; i < num_weight_sets; i++) free_matrix(opt_state->v_weights[i]);
+        free(opt_state->v_weights);
+    }
+    if (opt_state->m_biases) {
+        for (int i = 0; i < num_weight_sets; i++) free_matrix(opt_state->m_biases[i]);
+        free(opt_state->m_biases);
+    }
+    if (opt_state->v_biases) {
+        for (int i = 0; i < num_weight_sets; i++) free_matrix(opt_state->v_biases[i]);
+        free(opt_state->v_biases);
+    }
+    free(opt_state);
+}
+
 int nn_init_optimizer_state(NeuralNetwork* net) {
     if (net == NULL) {
         gann_set_error(GANN_ERROR_NULL_ARGUMENT);
@@ -144,7 +172,8 @@ int nn_init_optimizer_state(NeuralNetwork* net) {
     net->optimizer_state->v_biases = (Matrix**)calloc(num_weight_sets, sizeof(Matrix*));
 
     if (!net->optimizer_state->m_weights || !net->optimizer_state->v_weights || !net->optimizer_state->m_biases || !net->optimizer_state->v_biases) {
-        nn_free(net); // This will handle partial allocation inside optimizer_state
+        free_optimizer_state(net->optimizer_state, 0);
+        net->optimizer_state = NULL;
         gann_set_error(GANN_ERROR_ALLOC_FAILED);
         return 0;
     }
@@ -157,7 +186,9 @@ int nn_init_optimizer_state(NeuralNetwork* net) {
         net->optimizer_state->m_biases[i] = create_matrix(1, cols);
         net->optimizer_state->v_biases[i] = create_matrix(1, cols);
         if (!net->optimizer_state->m_weights[i] || !net->optimizer_state->v_weights[i] || !net->optimizer_state->m_biases[i] || !net->optimizer_state->v_biases[i]) {
-            nn_free(net); // This will handle partial allocation
+            free_optimizer_state(net->optimizer_state, num_weight_sets);
+            net->optimizer_state = NULL;
+            // create_matrix already sets the error code
             return 0;
         }
     }
@@ -179,23 +210,7 @@ void nn_free(NeuralNetwork* net) {
         free(net->biases);
     }
     if (net->optimizer_state) {
-        if (net->optimizer_state->m_weights) {
-            for (int i = 0; i < num_weight_sets; i++) free_matrix(net->optimizer_state->m_weights[i]);
-            free(net->optimizer_state->m_weights);
-        }
-        if (net->optimizer_state->v_weights) {
-            for (int i = 0; i < num_weight_sets; i++) free_matrix(net->optimizer_state->v_weights[i]);
-            free(net->optimizer_state->v_weights);
-        }
-        if (net->optimizer_state->m_biases) {
-            for (int i = 0; i < num_weight_sets; i++) free_matrix(net->optimizer_state->m_biases[i]);
-            free(net->optimizer_state->m_biases);
-        }
-        if (net->optimizer_state->v_biases) {
-            for (int i = 0; i < num_weight_sets; i++) free_matrix(net->optimizer_state->v_biases[i]);
-            free(net->optimizer_state->v_biases);
-        }
-        free(net->optimizer_state);
+        free_optimizer_state(net->optimizer_state, num_weight_sets);
     }
     free(net);
 }
@@ -353,12 +368,7 @@ NeuralNetwork* nn_load(const char* filepath) {
         fclose(file);
         return NULL;
     }
-    if (fread(architecture, sizeof(int), num_layers, file) != num_layers) {
-        gann_set_error(GANN_ERROR_FILE_READ);
-        free(architecture);
-        fclose(file);
-        return NULL;
-    }
+    CHECK_READ(architecture, sizeof(int), num_layers, file);
 
     NeuralNetwork* net = nn_create(num_layers, architecture, activation_hidden, activation_output);
     free(architecture);
